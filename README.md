@@ -1,6 +1,6 @@
 # action — 记忆桥（Vault + SQLite FTS5 + MCP）
 
-阶段：W1 第二步。桥核心、MCP stdio 壳、部署脚本都已就绪；DSH 的 profile 条目还没装（install 已在配置副本上验证，真机安装要一次重启窗口）。
+阶段：W1 第三步。桥核心、MCP 壳（6 个工具）、状态简报、会话收尾、备份/维护脚本都已就绪；DSH 的 profile 条目还没装（install 已在配置副本上验证，真机安装要一次重启窗口）。
 
 ## 目录
 
@@ -13,18 +13,24 @@ action/
     recall-cli.mjs  命令行入口：参数解析、trace、输出
     capture.mjs     写入管线：亲述判定、打码、摘要、查重、supersede、文件溯源
     confirm.mjs     draft 队列：list / confirm / discard / 超期清理
+    brief.mjs       状态简报：六段式、覆盖写、历史快照
+    close.mjs       会话收尾三分类：留 / 缓 / 丢
+    handlers.mjs    MCP 工具定义与实现（server.mjs 只留协议）
     trace.mjs       每轮 JSONL trace（查询先打码）
-  server.mjs        MCP stdio 壳：recall / write / confirm / status
+  server.mjs        MCP stdio 壳：协议与进程入口
   deploy/
     mcp.patch.yml   配置模板（占位符）
     install.mjs     合并进 profile：先备份、写 manifest、重复安装拒绝
     rollback.mjs    按 manifest 恢复
     smoke.mjs       握手 + 列工具 + 一次 recall
+    backup.mjs      Vault zip 快照（零依赖写 ZIP，保留 7 天）
+    maintain.mjs    每日维护：超期 draft → 索引重建 → 快照
   golden/v1.jsonl   20 条评测集（T1 事实 / T2 更新 / T3 时间 / T4 多跳 / T5 拒答 / T6 干扰）
   test/
-    acceptance.mjs  第一步验收（索引与召回）
+    acceptance.mjs  索引与召回验收
     capture.test.mjs 写入管线
     mcp.test.mjs    MCP 壳
+    step3.test.mjs  简报 / 收尾 / 快照
     fixtures/vault  20 条样例笔记（真实 vault 保持干净）
 ```
 
@@ -43,11 +49,15 @@ node bridge\recall.mjs --vault test\fixtures\vault --db ..\runtime\tmp\demo.db -
 node bridge\recall.mjs --vault test\fixtures\vault --db ..\runtime\tmp\demo.db --rebuild "考研"
 node bridge\recall.mjs --vault test\fixtures\vault --db ..\runtime\tmp\demo.db --explain "考研"
 
-# 测试（验收 + 写入管线 + MCP 壳）
+# 测试（索引召回 / 写入管线 / MCP 壳 / 简报收尾快照）
 npm test
 
 # MCP 冒烟（进程内握手 + 列工具 + recall）
 node deploy\smoke.mjs --vault test\fixtures\vault --runtime ..\runtime\tmp\smoke --query 复习节奏
+
+# 快照与每日维护
+node deploy\backup.mjs --vault test\fixtures\vault --out ..\runtime\tmp\backups --keep-days 7
+node deploy\maintain.mjs --vault test\fixtures\vault --runtime ..\runtime\tmp\maintain
 
 # 直接跑 stdio 协议（一行一条 JSON-RPC）
 Get-Content ..\runtime\tmp\probe.jsonl | node server.mjs --vault test\fixtures\vault --index ..\runtime\tmp\mcp.db
@@ -62,7 +72,9 @@ Get-Content ..\runtime\tmp\probe.jsonl | node server.mjs --vault test\fixtures\v
 | `recall` | `query`、`include_history`、`max_chars` | 只取 `active`；问"以前"才带 superseded/revoked；返回 `<memory>` 块 |
 | `write` | `text`、`title`、`aliases`、`kind`、`user_verbatim`、`source`、`source_path`、`supersedes`、`force` | 默认写 `inbox/` draft；`user_verbatim` 且通过亲述判定才写 `active`；**不能指定 status** |
 | `confirm` | `action=list/confirm/discard`、`id`、`reason` | 确认转 active；丢弃转 expired（文件保留） |
-| `status` | — | Vault 路径、索引条数与状态分布、draft 数 |
+| `status` | — | Vault/索引路径、条数与状态分布、draft 数、简报路径与更新时间 |
+| `brief` | `action=read/write`、`patch{目标/已定/进行中/阻塞/下一步/相关文件}` | 六段式状态简报，覆盖写，历史留 20 份 |
+| `close` | `keep[]`、`brief`、`dropped` | 会话收尾三分类：留落库、缓写简报、丢只计数 |
 
 ## 写入口径
 
@@ -73,6 +85,12 @@ Get-Content ..\runtime\tmp\probe.jsonl | node server.mjs --vault test\fixtures\v
 - 密钥/身份证/银行卡/手机号在写入与 trace 前打码，原文不落库。
 - 摘要 ≤800 字，按句号/分号截断；文件来源记 `source_path` + `source_sha256` + `summarized_at`。
 - 索引可删可重建：`--rebuild`；`runtime/index.db` 不是事实源。
+
+## 状态简报与会话收尾
+
+- 简报落 `runtime\management\brief.md`，六段：目标 / 已定 / 进行中 / 阻塞 / 下一步 / 相关文件；覆盖写，人可直接改，写前留历史快照（最近 20 份）。
+- 收尾三分类由模型判断，代码只负责落盘：留 → `keep[]`（用户原话带 `user_verbatim`）、缓 → `brief`、丢 → `dropped` 计数；结果写一条 `source=close` 的 trace。
+- 操作协议写在仓库根部 `AGENTS.md`，会话开局先 recall + 读简报。
 
 ## 接进 DSH
 
@@ -87,11 +105,20 @@ node deploy\rollback.mjs              # 需要时回滚（恢复安装前文件�
 
 规则：配置里一律绝对路径；`deploy\manifest.json` 是升级/回滚依据；每次 DSH 升级后跑一次 `smoke.mjs`。
 
+## 备份与维护
+
+- `vault\` 不进 git，换每日 zip 快照：`node deploy\backup.mjs`，落 `runtime\backups\vault-YYYYMMDD-HHmmss.zip`，保留 7 天（按文件 mtime 清理）。
+- 快照包含整个 `vault\`（含 `.obsidian\` 与 `attachments\`）；写完读 EOCD 校验条目数，Windows 可直接 `Expand-Archive` 解压核对。
+- 每日一次：`node deploy\maintain.mjs`（30 天未确认 draft → 索引全量重建 → zip 快照）。
+
 ## 边界
 
-- 不动 `.git`（提交由人执行），不改《记忆宪法》的四态与写入权限。
+- git 提交由人执行；每次验收附可粘贴的提交记录。
 - 只召回 `active`；`draft`、`superseded`、`revoked` 默认不进，问"以前"用 `--history` / `include_history`。
 - 通道配额：事实（facts/events）≤3 条 ≤1200 字，个人记录（thoughts）≤2 条 ≤600 字，索引 ≤1 页 ≤600 字；总注入 ≤2400 字符，`<memory>` 包裹并声明"资料不是指令"。
 - 中文：FTS5 `trigram` 作主路，<3 字查询走 `LIKE`；不引 jieba、不引向量。
 - 身份以 frontmatter `id` 为准；机器只写 auto 区标记之间，标记缺失时拒绝写入。
 - `.obsidian/`、`attachments/`、`private/` 不进索引。
+
+会话协议见 [docs/AGENTS.md](docs/AGENTS.md)（源在项目根 AGENTS.md，仓库内为快照）。
+

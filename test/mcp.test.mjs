@@ -37,7 +37,7 @@ check('initialize 返回 serverInfo', init?.result?.serverInfo?.name === 'memory
 
 const list = await rpc(2, 'tools/list');
 const names = (list?.result?.tools || []).map((t) => t.name);
-check('tools/list 四个工具', ['recall', 'write', 'confirm', 'status'].every((n) => names.includes(n)), names.join('、'));
+check('tools/list 六个工具', ['recall', 'write', 'confirm', 'status', 'brief', 'close'].every((n) => names.includes(n)), names.join('、'));
 
 const recalled = await callTool(3, 'recall', { query: '复习节奏' });
 check('recall 返回 <memory> 包装', textOf(recalled).includes('<memory>') && textOf(recalled).includes('facts/数学复习.md'));
@@ -58,6 +58,21 @@ check('confirm 转 active', confirmed.status === 'active' && String(confirmed.pa
 
 const status = jsonOf(await callTool(8, 'status', {}));
 check('status 返回索引与 draft 数', status.notes > 20 && typeof status.drafts === 'number', `notes=${status.notes}`);
+
+const briefWrite = jsonOf(await callTool(12, 'brief', {
+  action: 'write',
+  patch: { target: '接通 MCP', next: ['重启验证 mcp__memory__recall'] },
+}));
+check('brief 写入六段简报', briefWrite.sections.target === '接通 MCP' && briefWrite.sections.next.length === 1);
+const briefRead = jsonOf(await callTool(13, 'brief', { action: 'read' }));
+check('brief 读回一致', briefRead.exists && briefRead.sections.target === '接通 MCP');
+
+const closed = jsonOf(await callTool(14, 'close', {
+  keep: [{ text: '我决定先接 MCP 再写 AGENTS.md。', user_verbatim: true }],
+  brief: { doing: ['写 AGENTS.md'] },
+  dropped: 2,
+}));
+check('close 三分类落盘', closed.created === 1 && closed.dropped === 2 && closed.brief?.sections.doing.includes('写 AGENTS.md'));
 
 const unknownTool = await callTool(9, 'nope', {});
 check('未知工具返回 isError', unknownTool?.result?.isError === true);
