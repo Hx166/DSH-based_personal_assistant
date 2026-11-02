@@ -1,0 +1,15 @@
+# Vault 记忆桥的 MCP 配置模板。
+# install.mjs 会把下方 server/vault/index 三处占位符换成绝对路径（正斜杠）后合并进 profile。
+- insert:
+    - id: memory-vault
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: memory
+        transport: stdio
+        command: node
+        args:
+          - '{{SERVER}}'
+        env:
+          MEM_VAULT: '{{VAULT}}'
+          MEM_INDEX: '{{INDEX}}'
+        failOnStartupError: false
