@@ -10,6 +10,7 @@
   FAKE_REASON     强制返回 ok:false 的 reason（例如 metadata_mismatch）
   FAKE_STALE      1 时 stale:true
   FAKE_DELAY_MS   每条请求先睡多久（模拟超时）
+  FAKE_OP_LOG     把收到的每条请求（一行 JSON）追加到这个文件，供测试核对 ops
 """
 
 import json
@@ -18,7 +19,19 @@ import sys
 import time
 
 
+def _record(req):
+    log_path = os.environ.get("FAKE_OP_LOG")
+    if not log_path:
+        return
+    try:
+        with open(log_path, "a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(req, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def _payload(req):
+    _record(req)
     op = req.get("op") or ""
     delay = float(os.environ.get("FAKE_DELAY_MS") or 0) / 1000.0
     if delay:

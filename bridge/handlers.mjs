@@ -5,7 +5,11 @@ import { listDrafts, confirmDraft, discardDraft } from './confirm.mjs';
 import { readBrief, writeBrief } from './brief.mjs';
 import { closeSession } from './close.mjs';
 import { openIndex, closeIndex, indexStats } from './index.mjs';
+import { syncNotesToVector } from './vector.mjs';
 import { appendTrace } from './trace.mjs';
+
+/** 写链路的向量同步预算：只做尽力而为，绝不拖住工具返回 */
+const VECTOR_SYNC_BUDGET_MS = 2000;
 
 const text = (value, isError = false) => ({ content: [{ type: 'text', text: value }], isError });
 const jsonText = (value, isError = false) => text(JSON.stringify(value, null, 2), isError);
@@ -117,7 +121,38 @@ export const TOOLS = [
   },
 ];
 
-export function createHandlers({ vaultDir, runtimeDir, dbPath }) {
+export function createHandlers({ vaultDir, runtimeDir, dbPath, vectorDir = null }) {
+  /**
+   * 写工具成功后补一次向量增量同步：fire-and-forget，2s 预算，失败只记一行 trace。
+   * 不 await，不改变工具返回；向量库短暂落后时召回会自动降级为纯 FTS。
+   */
+  function syncVector(tool, ids) {
+    const wanted = [...new Set((ids || []).map((id) => String(id || '')).filter(Boolean))];
+    if (!wanted.length) return;
+    void (async () => {
+      let result;
+      try {
+        result = await syncNotesToVector({
+          dbPath, dir: vectorDir, ids: wanted, timeoutMs: VECTOR_SYNC_BUDGET_MS,
+        });
+      } catch (err) {
+        result = { ok: false, reason: `sync_error:${err?.message || err}`, ids: wanted.length, written: 0 };
+      }
+      if (result?.ok) return;
+      await appendTrace(runtimeDir, {
+        at: new Date().toISOString(),
+        source: 'mcp',
+        event: 'vector_sync',
+        tool,
+        ok: false,
+        ids: wanted.length,
+        written: Number(result?.written) || 0,
+        reason: result?.reason || 'failed',
+        ms: result?.ms ?? null,
+      });
+    })().catch(() => { /* 同步失败必须静默 */ });
+  }
+
   async function toolRecall(args = {}) {
     const query = String(args.query || '').trim();
     if (!query) throw new Error('query 不能为空');
@@ -172,17 +207,27 @@ export function createHandlers({ vaultDir, runtimeDir, dbPath }) {
     if (result.action === 'duplicate') {
       return jsonText({ action: 'duplicate', matches: result.matches, hint: '已存在相同或相近条目；确需新增传 force=true' });
     }
+    // 新条目与被取代的旧条目状态都变了，一起增量同步
+    const changed = [result.id];
+    if (result.action === 'created+superseded' && result.superseded?.id) changed.push(result.superseded.id);
+    syncVector('write', changed);
     return jsonText(result);
   }
 
   async function toolConfirm(args = {}) {
     const action = String(args.action || 'list');
     if (action === 'list') return jsonText({ drafts: await listDrafts({ vaultDir }) });
-    if (action === 'confirm') return jsonText(await confirmDraft({ vaultDir, dbPath, id: String(args.id || '') }));
+    if (action === 'confirm') {
+      const result = await confirmDraft({ vaultDir, dbPath, id: String(args.id || '') });
+      if (result?.id) syncVector('confirm', [result.id]);
+      return jsonText(result);
+    }
     if (action === 'discard') {
-      return jsonText(await discardDraft({
+      const result = await discardDraft({
         vaultDir, dbPath, id: String(args.id || ''), reason: String(args.reason || ''),
-      }));
+      });
+      if (result?.id) syncVector('confirm', [result.id]);
+      return jsonText(result);
     }
     throw new Error(`未知 action：${action}`);
   }
@@ -233,6 +278,10 @@ export function createHandlers({ vaultDir, runtimeDir, dbPath }) {
       brief: args.brief && typeof args.brief === 'object' ? args.brief : null,
       dropped: Number(args.dropped || 0),
     });
+    const created = (result?.kept || [])
+      .filter((entry) => entry.action !== 'duplicate' && entry.id)
+      .map((entry) => entry.id);
+    if (created.length) syncVector('close', created);
     return jsonText(result);
   }
 

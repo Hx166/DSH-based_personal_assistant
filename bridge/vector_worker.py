@@ -262,6 +262,7 @@ def _meta_of(note):
         "channel": channel,
         "status": str(note.get("status") or "active"),
         "updated_at": str(note.get("updated_at") or ""),
+        "doc_hash": str(note.get("doc_hash") or ""),
     }
 
 

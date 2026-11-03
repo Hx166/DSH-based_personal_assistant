@@ -35,6 +35,8 @@ export const DEFAULT_QUERY_PREFIX =
 const OP_TIMEOUT_MS = 5000;
 const FIRST_TIMEOUT_MS = 30000;
 const REBUILD_TIMEOUT_MS = 120000;
+/** 增量同步的总预算：写链路只做 fire-and-forget，超时就放弃本轮（下次写入/维护再补） */
+const SYNC_TIMEOUT_MS = 2000;
 const POLL_MS = 10;
 const HARD_REASONS = new Set([
   'count_mismatch', 'metadata_mismatch', 'bad_config', 'chromadb_missing',
@@ -294,7 +296,7 @@ class VectorSession {
     }
   }
 
-  request(op, payload = {}, { timeoutMs = null } = {}) {
+  request(op, payload = {}, { timeoutMs = null, onTimeout = 'stop' } = {}) {
     return (async () => {
       try {
         await this.ensureStarted();
@@ -303,14 +305,21 @@ class VectorSession {
       }
       const id = ++this.seq;
       const budget = Number(timeoutMs) || (this.first ? FIRST_TIMEOUT_MS : OP_TIMEOUT_MS);
+      // detach：写链路的增量同步用。超时只放弃本轮，不 softFail、不杀 worker，
+      // 否则后台同步会把正在服务 recall 的 worker 杀掉，甚至把向量通道整体禁用。
+      const detach = onTimeout === 'detach';
       const promise = new Promise((resolve) => {
         const entry = { resolve, timer: null };
         this.pending.set(id, entry);
         entry.timer = setTimeout(() => {
           if (!this.pending.has(id)) return;
           this.pending.delete(id);
-          this.softFail('timeout');
           resolve({ ok: false, reason: 'timeout', op, id, detail: `${budget}ms 内无响应` });
+          if (detach) {
+            this.armIdle();
+            return;
+          }
+          this.softFail('timeout');
           void this.stop();
         }, budget);
       });
@@ -527,10 +536,12 @@ export function notePayload(row) {
     channel: Number(row.channel) || 0,
     status: String(row.status || 'active'),
     updated_at: String(row.updated_at || ''),
+    // 与 FTS 侧同一指纹：增量同步后可用它核对 collection 是否落后于索引
+    doc_hash: String(row.doc_hash || ''),
   };
 }
 
-/** 索引库 → 向量库全量同步（--rebuild / eval 用；写链路不改，增量同步留给阶段 B） */
+/** 索引库 → 向量库全量同步（--rebuild / eval / maintain 用；增量同步见 syncNotesToVector） */
 export async function syncIndexToVector({ dbPath, dir = null, mode = null, timeoutMs = null } = {}) {
   const resolved = vectorMode(mode);
   if (resolved === 'off') return { ok: false, reason: 'off' };
@@ -551,4 +562,113 @@ export async function syncIndexToVector({ dbPath, dir = null, mode = null, timeo
   const response = await session.request('rebuild', { notes }, { timeoutMs: timeoutMs ?? REBUILD_TIMEOUT_MS });
   session.applyReason(response.reason);
   return { ...wrap({ ...response, notes: notes.length }, config, session), notes: notes.length };
+}
+
+// ---------------------------------------------------------------- 增量同步（写链路）
+
+// 最近一次增量同步的结果；写链路是 fire-and-forget，失败只靠 trace 与这个快照留痕
+let lastSync = null;
+let syncAttempts = 0;
+let syncFailures = 0;
+
+function recordSync(result) {
+  syncAttempts += 1;
+  if (!result.ok) syncFailures += 1;
+  lastSync = {
+    at: new Date().toISOString(),
+    ok: Boolean(result.ok),
+    reason: result.reason ?? null,
+    ids: Number(result.ids) || 0,
+    found: Number(result.found) || 0,
+    written: Number(result.written) || 0,
+    failed: Number(result.failed) || 0,
+    ms: Number(result.ms) || 0,
+    dir: result.dir ?? null,
+    mode: result.mode ?? null,
+  };
+  return lastSync;
+}
+
+/** 最近一次增量同步的快照（tests/诊断用）；纯读，不启动 worker */
+export function syncStatus() {
+  return {
+    ...(lastSync || {
+      at: null, ok: null, reason: 'none', ids: 0, found: 0,
+      written: 0, failed: 0, ms: 0, dir: null, mode: null,
+    }),
+    attempts: syncAttempts,
+    failures: syncFailures,
+  };
+}
+
+/**
+ * 按 id 从索引库取整行 → 逐条 upsert 到向量库；id/document/metadata 与全量 rebuild 同源。
+ * 空 ids 直接返回，不碰 worker；任何失败都返回 ok:false（不抛）。
+ * timeoutMs 是整轮总预算：写链路 2s，超时就放弃本轮，等下一条写入或下次维护补。
+ */
+export async function syncNotesToVector({ dbPath, dir = null, ids = [], mode = null, timeoutMs = null } = {}) {
+  const t0 = Date.now();
+  const wanted = [...new Set((ids || []).map(String).filter(Boolean))];
+  if (!wanted.length) {
+    return { ok: true, reason: 'empty', ids: 0, found: 0, written: 0, failed: 0, ms: 0, dir: dir ? path.resolve(String(dir)) : null };
+  }
+  const resolved = vectorMode(mode);
+  if (resolved === 'off') {
+    return recordSync({ ok: false, reason: 'off', ids: wanted.length, ms: Date.now() - t0, mode: resolved });
+  }
+  const config = vectorConfig({ dbPath, dir });
+  if (resolved === 'auto' && !existsSync(config.python)) {
+    return recordSync({
+      ok: false, reason: 'python_missing', ids: wanted.length, ms: Date.now() - t0,
+      dir: config.dir, mode: resolved,
+    });
+  }
+  let notes = [];
+  try {
+    const db = openIndex(dbPath);
+    try {
+      notes = getNotesByIds(db, wanted).map(notePayload);
+    } finally {
+      closeIndex(db);
+    }
+  } catch (err) {
+    return recordSync({
+      ok: false, reason: 'db_error', ids: wanted.length, ms: Date.now() - t0,
+      dir: config.dir, mode: resolved,
+    });
+  }
+  if (!notes.length) {
+    return recordSync({
+      ok: false, reason: 'not_found', ids: wanted.length, ms: Date.now() - t0,
+      dir: config.dir, mode: resolved,
+    });
+  }
+
+  const budget = Number(timeoutMs) || SYNC_TIMEOUT_MS;
+  const deadline = Date.now() + budget;
+  const session = getSession(config);
+  let written = 0;
+  let lastReason = null;
+  for (const note of notes) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      lastReason = 'timeout';
+      break;
+    }
+    const response = await session.request('upsert', { notes: [note] }, {
+      timeoutMs: remaining, onTimeout: 'detach',
+    });
+    session.applyReason(response.reason);
+    if (!response.ok) {
+      lastReason = response.reason || 'sync_failed';
+      break;
+    }
+    written += Number(response.written) || 1;
+  }
+  const ok = lastReason === null;
+  return recordSync({
+    ok, reason: ok ? null : lastReason, ids: wanted.length, found: notes.length,
+    written, failed: notes.length - written, ms: Date.now() - t0,
+    dir: config.dir, mode: resolved,
+  });
 }
