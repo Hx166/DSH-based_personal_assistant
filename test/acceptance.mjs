@@ -9,6 +9,9 @@
 // 7) auto 区写入不伤人写区；checksum 更新；并发冲突可检出
 // 8) 命令行 recall --json 可跑
 // 9) golden/v1.jsonl 证据命中率（信息项，不计入退出码）
+//
+// 阶段 C 起 recall 默认把状态简报置顶（channel=0）。本文件测的是 Vault 证据，
+// 所有 recall 都传 brief: false 以避免受真实 runtime 简报影响；简报置顶见 brief-pin.test.mjs。
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -69,7 +72,7 @@ async function main() {
   let hit1 = 0;
   const misses = [];
   for (const [query, want] of A10) {
-    const r = await recall(query, { vaultDir: FIXTURE, dbPath: DB });
+    const r = await recall(query, { vaultDir: FIXTURE, dbPath: DB, brief: false });
     const got = r.items[0]?.path || '(空)';
     if (got === want) hit1 += 1;
     else misses.push(`${query} → ${got}（期望 ${want}）`);
@@ -79,12 +82,12 @@ async function main() {
   // 3) 2 字查询与别名
   const empty = [];
   for (const q of TWO_CHAR) {
-    const r = await recall(q, { vaultDir: FIXTURE, dbPath: DB });
+    const r = await recall(q, { vaultDir: FIXTURE, dbPath: DB, brief: false });
     if (!r.items.length) empty.push(q);
   }
   check('2 字查询不空', empty.length === 0, empty.length ? `空：${empty.join('、')}` : `${TWO_CHAR.length}/${TWO_CHAR.length} 非空`);
 
-  const alias = await recall('大创', { vaultDir: FIXTURE, dbPath: DB });
+  const alias = await recall('大创', { vaultDir: FIXTURE, dbPath: DB, brief: false });
   check('别名展开（大创 → SRTP 项目）', alias.items[0]?.path === 'facts/SRTP项目.md', alias.items[0]?.path || '(空)');
 
   // 4) rebuild 前后一致
@@ -92,7 +95,7 @@ async function main() {
   const signature = async () => {
     const out = [];
     for (const q of detQueries) {
-      const r = await recall(q, { vaultDir: FIXTURE, dbPath: DB });
+      const r = await recall(q, { vaultDir: FIXTURE, dbPath: DB, brief: false });
       out.push({ q, items: r.items.map((i) => [i.path, i.score]) });
     }
     return JSON.stringify(out);
@@ -104,23 +107,23 @@ async function main() {
   check('rebuild 后结果一致', before === after, `${second.stats.notes} 条 / ${second.stats.ms}ms`);
 
   // 5) 状态过滤
-  const draft = await recall('读博', { vaultDir: FIXTURE, dbPath: DB });
+  const draft = await recall('读博', { vaultDir: FIXTURE, dbPath: DB, brief: false });
   check('draft 不进普通召回', draft.items.length === 0, `命中 ${draft.items.length} 条`);
-  const normal = await recall('每天三小时', { vaultDir: FIXTURE, dbPath: DB });
+  const normal = await recall('每天三小时', { vaultDir: FIXTURE, dbPath: DB, brief: false });
   const normalPaths = normal.items.map((i) => i.path);
   check('superseded 页默认不召回（现行页可命中）',
     !normalPaths.includes(HISTORY_PAGE),
     normalPaths.includes(HISTORY_PAGE) ? `旧版页被召回：${HISTORY_PAGE}` : `旧版页未召回；命中现行页：${normalPaths.join('、') || '无'}`);
-  const withHistory = await recall('每天三小时', { vaultDir: FIXTURE, dbPath: DB, includeHistory: true });
+  const withHistory = await recall('每天三小时', { vaultDir: FIXTURE, dbPath: DB, includeHistory: true, brief: false });
   check('--history 时旧版可召回', withHistory.items.some((i) => i.path === HISTORY_PAGE));
-  const revoked = await recall('非统考院校', { vaultDir: FIXTURE, dbPath: DB });
+  const revoked = await recall('非统考院校', { vaultDir: FIXTURE, dbPath: DB, brief: false });
   const revokedPaths = revoked.items.map((i) => i.path);
   check('revoked 页默认不召回（关联页可命中）',
     !revokedPaths.includes(REVOKED_PAGE),
     revokedPaths.includes(REVOKED_PAGE) ? `撤回页被召回：${REVOKED_PAGE}` : `撤回页未召回；命中关联页：${revokedPaths.join('、') || '无'}`);
 
   // 6) 预算与配额
-  const broad = await recall('考研', { vaultDir: FIXTURE, dbPath: DB });
+  const broad = await recall('考研', { vaultDir: FIXTURE, dbPath: DB, brief: false });
   const counts = { 3: 0, 2: 0, 1: 0 };
   for (const item of broad.items) counts[item.channel] += 1;
   check('注入 ≤ 2400 字符', broad.chars <= BUDGET, `${broad.chars} 字符`);
@@ -170,7 +173,7 @@ async function main() {
 
   // 8) 命令行入口（进程内跑 main()，沙箱下子进程 spawn 会 EPERM）
   const outFile = path.join(TMP, 'cli.json');
-  await recallMain(['--vault', FIXTURE, '--db', DB, '--out', outFile, '目标院校']);
+  await recallMain(['--vault', FIXTURE, '--db', DB, '--out', outFile, '--no-brief', '目标院校']);
   const cli = JSON.parse(await fs.readFile(outFile, 'utf8'));
   check('命令行 recall（argv 解析 + --out）', cli.items?.[0]?.path === 'facts/考研目标.md', cli.items?.[0]?.path || '(空)');
 
@@ -189,7 +192,7 @@ async function main() {
   let evTotal = 0;
   let leak = 0;
   for (const g of cases) {
-    const r = await recall(g.query, { vaultDir: FIXTURE, dbPath: DB });
+    const r = await recall(g.query, { vaultDir: FIXTURE, dbPath: DB, brief: false });
     const paths = r.items.map((i) => i.path);
     if (g.evidence?.length) {
       evTotal += 1;

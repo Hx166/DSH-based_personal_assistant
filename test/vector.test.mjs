@@ -159,7 +159,7 @@ async function main() {
 
   // ---- 3) 降级：MEM_VECTOR=off
   const baseline = await withEnv({ MEM_VECTOR: 'off' }, () => recall('目标院校', {
-    vaultDir: FIXTURE, dbPath: DB, vectorDir: path.join(TMP, 'off-vector'),
+    vaultDir: FIXTURE, dbPath: DB, vectorDir: path.join(TMP, 'off-vector'), brief: false,
   }));
   check('MEM_VECTOR=off 不启动向量通道',
     baseline.channels.vector?.used === false && baseline.channels.vector?.reason === 'off',
@@ -167,7 +167,7 @@ async function main() {
 
   const missingPy = await withEnv({
     MEM_VECTOR: 'auto', MEM_VECTOR_PY: path.join(TMP, 'no-such-python.exe'),
-  }, () => recall('目标院校', { vaultDir: FIXTURE, dbPath: DB, vectorDir: path.join(TMP, 'missing-py') }));
+  }, () => recall('目标院校', { vaultDir: FIXTURE, dbPath: DB, vectorDir: path.join(TMP, 'missing-py'), brief: false }));
   check('解释器缺失 → 静默降级 python_missing',
     missingPy.channels.vector?.used === false && missingPy.channels.vector?.reason === 'python_missing',
     `reason=${missingPy.channels.vector?.reason}`);
@@ -192,7 +192,7 @@ async function main() {
   };
   let fakeInfo = null;
   const fakeRun = await withEnv(fakeEnv, async () => {
-    const run = await recall('目标院校', { vaultDir: FIXTURE, dbPath: DB, vectorDir: fakeDir });
+    const run = await recall('目标院校', { vaultDir: FIXTURE, dbPath: DB, vectorDir: fakeDir, brief: false });
     fakeInfo = vectorSessionInfo({ dbPath: DB, dir: fakeDir });
     return run;
   });
@@ -212,7 +212,7 @@ async function main() {
 
   // ---- 5) 假 worker：metadata 不一致 → 降级
   const staleRun = await withEnv({ ...fakeEnv, FAKE_REASON: 'metadata_mismatch', FAKE_STALE: '1' }, () => recall('目标院校', {
-    vaultDir: FIXTURE, dbPath: DB, vectorDir: path.join(TMP, 'stale-vector'),
+    vaultDir: FIXTURE, dbPath: DB, vectorDir: path.join(TMP, 'stale-vector'), brief: false,
   }));
   check('假 worker：metadata 不一致 → stale 且降级',
     staleRun.channels.vector?.used === false

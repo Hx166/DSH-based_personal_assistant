@@ -68,6 +68,8 @@ async function runMode({ cases, vaultDir, dbPath, vector, vectorDir, maxDistance
       vector,
       vectorDir,
       vectorMaxDistance: maxDistance,
+      // 阶段 C：评测不掺入状态简报，两列都只看 Vault 证据
+      brief: false,
     });
     runs.push({
       id: item.id,

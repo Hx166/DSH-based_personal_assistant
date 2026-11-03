@@ -21,6 +21,7 @@
     "test:mcp": "node --disable-warning=ExperimentalWarning test/mcp.test.mjs",
     "test:step3": "node --disable-warning=ExperimentalWarning test/step3.test.mjs",
     "test:vector": "node --disable-warning=ExperimentalWarning test/vector.test.mjs",
-    "test": "node --disable-warning=ExperimentalWarning test/acceptance.mjs && node --disable-warning=ExperimentalWarning test/capture.test.mjs && node --disable-warning=ExperimentalWarning test/mcp.test.mjs && node --disable-warning=ExperimentalWarning test/step3.test.mjs && node --disable-warning=ExperimentalWarning test/vector.test.mjs"
+    "test:brief": "node --disable-warning=ExperimentalWarning test/brief-pin.test.mjs",
+    "test": "node --disable-warning=ExperimentalWarning test/acceptance.mjs && node --disable-warning=ExperimentalWarning test/capture.test.mjs && node --disable-warning=ExperimentalWarning test/mcp.test.mjs && node --disable-warning=ExperimentalWarning test/step3.test.mjs && node --disable-warning=ExperimentalWarning test/vector.test.mjs && node --disable-warning=ExperimentalWarning test/brief-pin.test.mjs"
   }
 }

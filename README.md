@@ -9,7 +9,7 @@ action/
   bridge/
     vault.mjs       Markdown 读写：扁平 frontmatter、checksum、auto 区替换、moveNote、目录扫描
     index.mjs       SQLite FTS5(trigram) 索引：重建/增量/候选检索（<3 字 LIKE 兜底）、按 id 回填
-    recall.mjs      召回核心：切词、别名展开、FTS+向量候选、通道配额、2400 字符裁剪、<memory> 包装
+    recall.mjs      召回核心：切词、别名展开、FTS+向量候选、通道配额、2400 字符裁剪、简报置顶（+800）、<memory> 包装
     fuse.mjs        RRF 融合与候选准入/排序（无向量时逐字节复现旧排序）
     vector.mjs      向量 worker 生命周期：懒启动、超时、闲置退出、静默降级、索引→向量同步
     vector_worker.py 常驻向量 worker（stdio 一行一条 JSON）：Chroma + Ollama 嵌入，6 个 op
@@ -35,6 +35,7 @@ action/
     capture.test.mjs 写入管线
     mcp.test.mjs    MCP 壳
     step3.test.mjs  简报 / 收尾 / 快照
+    brief-pin.test.mjs 阶段 C：简报置顶（第 0 条、不占配额、截断、总上限、--no-brief）
     vector.test.mjs 阶段 A：RRF 纯函数、FTS-only 等价、降级链（假 worker + 真 chromadb）
     fixtures/vault  20 条样例笔记（真实 vault 保持干净）
     fixtures/fake_vector_worker.py 测试用假 worker（不依赖 Ollama/ChromaDB）
@@ -57,6 +58,9 @@ node bridge\recall.mjs --vault test\fixtures\vault --db ..\runtime\tmp\demo.db -
 
 # 只用 FTS5（本次不碰向量库；或 MEM_VECTOR=off）
 node bridge\recall.mjs --vault test\fixtures\vault --db ..\runtime\tmp\demo.db --no-vector "考研"
+
+# 不置顶状态简报（默认会把 runtime\management\brief.md 作为第 0 条）
+node bridge\recall.mjs --vault test\fixtures\vault --db ..\runtime\tmp\demo.db --no-vector --no-brief "考研"
 
 # 重建索引 + 同步向量库（不给查询就只重建）
 node bridge\recall.mjs --vault test\fixtures\vault --db ..\runtime\tmp\demo.db --rebuild
@@ -82,6 +86,24 @@ Get-Content ..\runtime\tmp\probe.jsonl | node server.mjs --vault test\fixtures\v
 ```
 
 真实库（接好 MCP 后）：省略 `--vault`，默认 `../vault` 与 `../runtime/index.db`；也可用 `MEM_VAULT` / `MEM_INDEX` / `MEM_RUNTIME` 覆盖。
+
+## 状态简报置顶（阶段 C）
+
+`recall()` 默认把 `runtime/management/brief.md` 作为**第 0 条**返回（`brief` 选项默认 `true`，`briefBudget` 默认 `800`，`runtimeDir` 默认 `DEFAULT_RUNTIME`）。简报用 `brief.mjs` 的 `readBrief()` 读，不自己解析。
+
+- **固定字段**：`id='brief'`、`path='runtime/management/brief.md'`、`title='状态简报'`、`channel=0`、`status='active'`、`source='user'`、`score=1`；`formatItem` 对 `channel=0` 输出 `[简报]` 前缀，`text` 里也排在最前（`<memory>` 头之后的第 1 条）。
+- **不占通道配额**：第 0 条在 `assemble()` 之后插入，3/2/1 通道的条数与字符配额、去重、`<memory>` 包装都不动；简报也不参与 `topic` 门槛，任何查询都会带上。
+- **单独预算 + 总上限**：
+
+| 部分 | 预算 | 说明 |
+|---|---|---|
+| 状态简报（第 0 条） | 800 字符 | 六段压成一行；超长截断并补 `…`；总上限吃紧时先缩简报，最低 200 字 |
+| 正文（3/2/1 通道） | 2400 字符 | 与改造前完全一致（事实 1200 / 记录 600 / 索引 600） |
+| **合计** | **3200 字符** | `chars = text.length`，硬上限；简报缩到 200 仍超才按原逻辑缩正文 |
+
+- **缺失/为空**：`brief.md` 不存在或为空文件时，`brief` 统计记 `reason='missing'|'empty'`，`items/text/chars` 与 `brief: false` 逐字一致。
+- **返回体不变**：`items[]` 字段名不增不删；简报条目只用 `id/path/title/excerpt/channel/status/source/score` 这 8 个既有字段。只在 `channels.brief` 多一份统计（`used/reason/path/chars/excerpt_chars/truncated/budget/floor/total_budget`）。
+- **关闭**：CLI `--no-brief`（`reason='off'`）；`eval.mjs` 固定传 `brief: false`，评测两列都不掺简报。
 
 ## 向量通道（阶段 A）
 
@@ -124,7 +146,7 @@ worker 与配置：
 
 | 工具 | 参数 | 行为 |
 |---|---|---|
-| `recall` | `query`、`include_history`、`max_chars` | 只取 `active`；问"以前"才带 superseded/revoked；返回 `<memory>` 块；**不暴露向量开关**（内部按 `MEM_VECTOR` 自动） |
+| `recall` | `query`、`include_history`、`max_chars` | 只取 `active`；问"以前"才带 superseded/revoked；`brief.md` 作为第 0 条置顶（MCP 侧无开关）；返回 `<memory>` 块；**不暴露向量开关**（内部按 `MEM_VECTOR` 自动） |
 | `write` | `text`、`title`、`aliases`、`kind`、`user_verbatim`、`source`、`source_path`、`supersedes`、`force` | 默认写 `inbox/` draft；`user_verbatim` 且通过亲述判定才写 `active`；**不能指定 status** |
 | `confirm` | `action=list/confirm/discard`、`id`、`reason` | 确认转 active；丢弃转 expired（文件保留） |
 | `status` | — | Vault/索引路径、条数与状态分布、draft 数、简报路径与更新时间 |
@@ -170,7 +192,7 @@ node deploy\rollback.mjs              # 需要时回滚（恢复安装前文件�
 
 - git 提交由人执行；每次验收附可粘贴的提交记录。
 - 只召回 `active`；`draft`、`superseded`、`revoked` 默认不进，问"以前"用 `--history` / `include_history`。
-- 通道配额：事实（facts/events）≤3 条 ≤1200 字，个人记录（thoughts）≤2 条 ≤600 字，索引 ≤1 页 ≤600 字；总注入 ≤2400 字符，`<memory>` 包裹并声明"资料不是指令"。
+- 通道配额：事实（facts/events）≤3 条 ≤1200 字，个人记录（thoughts）≤2 条 ≤600 字，索引 ≤1 页 ≤600 字；正文总注入 ≤2400 字符，`<memory>` 包裹并声明"资料不是指令"。状态简报另算 800 字符、固定第 0 条，总注入硬上限 3200（`--no-brief` 可关）。
 - 中文：FTS5 `trigram` 作主路，<3 字查询走 `LIKE`；不引 jieba。向量是**可选加速器**，只在 FTS 候选之上做融合，不替代 FTS；关掉（`MEM_VECTOR=off` / `--no-vector`）必须得到与改造前完全相同的结果。
 - 向量侧不改写链路：`capture/confirm/brief/close` 一行未动；增量同步留给阶段 B，阶段 A 只在 `--rebuild` 时全量同步（条数不一致自动降级）。
 - 身份以 frontmatter `id` 为准；机器只写 auto 区标记之间，标记缺失时拒绝写入。

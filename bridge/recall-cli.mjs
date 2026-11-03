@@ -8,7 +8,7 @@ import { syncIndexToVector, closeVectorWorkers, vectorMode } from './vector.mjs'
 import { appendTrace } from './trace.mjs';
 
 const BOOL = new Set([
-  'json', 'history', 'no-alias', 'rebuild', 'explain', 'help', 'no-vector',
+  'json', 'history', 'no-alias', 'rebuild', 'explain', 'help', 'no-vector', 'no-brief',
 ]);
 
 function parseArgs(argv) {
@@ -36,6 +36,7 @@ const USAGE = `用法: node bridge/recall.mjs "查询" [选项]
   --history        允许召回 superseded/revoked（问"以前"时用）
   --no-alias       关闭别名展开
   --no-vector      本次只用 FTS5（向量通道关闭；也可 MEM_VECTOR=off）
+  --no-brief       本次不置顶状态简报（简报单独预算 800，默认开）
   --vector-dir DIR 向量库目录（默认 <索引库目录>/vector，或 MEM_VECTOR_DIR）
   --rebuild        先全量重建索引，并把向量库同步成同一批笔记
   --explain        把候选与打分打到 stderr
@@ -85,13 +86,15 @@ export async function main(argv = process.argv.slice(2)) {
       budget,
       includeHistory: Boolean(opts.history),
       expandAliases: !opts['no-alias'],
+      brief: !opts['no-brief'],
       vector,
       vectorDir,
     });
 
     if (opts.explain) {
       const vectorInfo = result.channels?.vector || {};
-      console.error(`[recall] ${result.ms}ms terms=${result.terms.join('|')} expanded=${result.expanded.length} candidates=${result.candidates} chars=${result.chars} vector=${vectorInfo.used ? `on(${vectorInfo.hits})` : `off(${vectorInfo.reason})`}`);
+      const briefInfo = result.channels?.brief || {};
+      console.error(`[recall] ${result.ms}ms terms=${result.terms.join('|')} expanded=${result.expanded.length} candidates=${result.candidates} chars=${result.chars} vector=${vectorInfo.used ? `on(${vectorInfo.hits})` : `off(${vectorInfo.reason})`} brief=${briefInfo.used ? `on(${briefInfo.excerpt_chars}/${briefInfo.budget})` : `off(${briefInfo.reason})`}`);
       for (const item of result.items) console.error(`  ${item.score}\t${item.channel}\t${item.path}\t${item.title}`);
     }
     if (opts.trace !== 'off') {

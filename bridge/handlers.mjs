@@ -37,7 +37,7 @@ export const TOOLS = [
       properties: {
         query: { type: 'string', description: '检索词，可中文短语；2 字词也可' },
         include_history: { type: 'boolean', description: '是否连 superseded/revoked 一起召回' },
-        max_chars: { type: 'number', description: '本次注入预算，默认 2400' },
+        max_chars: { type: 'number', description: '正文注入预算，默认 2400；状态简报另算 800，总上限 3200' },
       },
       required: ['query'],
     },
@@ -160,6 +160,8 @@ export function createHandlers({ vaultDir, runtimeDir, dbPath, vectorDir = null 
     const result = await recall(query, {
       vaultDir,
       dbPath,
+      // 简报从本会话的 runtime 目录读（默认与 DEFAULT_RUNTIME 相同）
+      runtimeDir,
       includeHistory: Boolean(args.include_history),
       budget: Number(args.max_chars || BUDGET),
     });
