@@ -1,10 +1,12 @@
-// bridge/recall.mjs — 召回核心：查询展开 → 候选 → 排序 → 通道配额 → 2400 字符裁剪 → <memory> 包装。
+// bridge/recall.mjs — 召回核心：查询展开 → 候选（FTS + 向量）→ RRF 融合 → 通道配额 → 2400 字符裁剪 → <memory> 包装。
 // 命令行入口在 recall-cli.mjs；直接执行本文件也会转交过去。
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  ensureIndex, closeIndex, searchIndex, loadEntities,
+  ensureIndex, closeIndex, searchIndex, loadEntities, getNotesByIds, indexStats,
 } from './index.mjs';
+import { rankCandidates, DEFAULT_RRF_K, DEFAULT_MAX_DISTANCE } from './fuse.mjs';
+import { vectorMode, vectorQuery } from './vector.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const ACTION_ROOT = path.resolve(HERE, '..');
@@ -168,20 +170,60 @@ function formatItem(item) {
 
 const round = (n) => Math.round(n * 1000) / 1000;
 
-function rankRows(rows, terms, { includeHistory = false } = {}) {
-  const scored = [];
-  for (const row of rows) {
-    // history/inbox 平时通道为 0；只有显式问"以前"时才按事实通道参与
-    const channel = Number(row.channel) || (includeHistory ? 3 : 0);
-    if (!channel) continue;
-    const topic = scoreTopic(row, terms);
-    if (topic > 0) scored.push({ row: { ...row, channel }, topic });
+/** 向量侧召回条数：比通道配额宽，给 RRF 留排序空间 */
+const VECTOR_N = 30;
+
+/**
+ * 向量通道：query 之后把命中并进候选行（FTS 没覆盖的按 id 回填整行）。
+ * 任何失败都只写 channels.vector 的 reason，返回 hits=null，让上层走纯 FTS 排序。
+ */
+async function vectorChannel({ query, dbPath, vectorDir, mode, statuses, db, rows, maxDistance }) {
+  const stat = {
+    used: false, ok: false, hits: 0, reason: 'off', stale: false,
+    max_distance: maxDistance, k: DEFAULT_RRF_K, n: VECTOR_N, ms: null, count: null, backfill: 0,
+    transport: null,
+  };
+  if (vectorMode(mode) === 'off') return { rows, hits: null, stat };
+  try {
+    let expected = null;
+    try {
+      expected = indexStats(db).notes;
+    } catch {
+      expected = null;
+    }
+    const response = await vectorQuery({
+      dbPath, dir: vectorDir, text: query, n: VECTOR_N, statuses, expectedCount: expected, mode,
+    });
+    stat.ms = response.ms ?? null;
+    stat.count = response.count ?? null;
+    stat.stale = Boolean(response.stale);
+    stat.transport = response.transport ?? null;
+    if (!response.ok) {
+      stat.reason = response.reason || 'unavailable';
+      return { rows, hits: null, stat };
+    }
+    const hits = Array.isArray(response.hits) ? response.hits : [];
+    stat.used = true;
+    stat.ok = true;
+    stat.hits = hits.length;
+    stat.reason = null;
+    const known = new Set(rows.map((row) => String(row.id)));
+    const missing = [...new Set(hits
+      .map((hit) => String(hit.id))
+      .filter((id) => id && !known.has(id)))];
+    let extra = [];
+    if (missing.length) {
+      const allowed = new Set(statuses.map(String));
+      extra = getNotesByIds(db, missing).filter((row) => allowed.has(String(row.status)));
+      stat.backfill = extra.length;
+    }
+    return { rows: [...rows, ...extra], hits, stat };
+  } catch (err) {
+    // 兜底：向量侧崩了也只记原因，不中断召回
+    stat.reason = err?.reason || `vector_error:${err?.code || err?.name || 'unknown'}`;
+    stat.stale = false;
+    return { rows, hits: null, stat };
   }
-  scored.sort((a, b) => (b.row.channel - a.row.channel)
-    || (b.topic - a.topic)
-    || String(b.row.updated_at || '').localeCompare(String(a.row.updated_at || ''))
-    || (a.row.path < b.row.path ? -1 : 1));
-  return scored;
 }
 
 /** 按通道配额与字符预算装配；同一标题+开头即视为重复，只留分高的一条 */
@@ -227,6 +269,10 @@ export async function recall(query, opts = {}) {
     quotas = QUOTAS,
     includeHistory = false,
     expandAliases = true,
+    // null = 跟随 MEM_VECTOR（off/auto/on）；CLI 的 --no-vector 传 'off'
+    vector = null,
+    vectorDir = null,
+    vectorMaxDistance = DEFAULT_MAX_DISTANCE,
   } = opts;
   const t0 = Date.now();
   const { db, rebuilt } = await ensureIndex({ vaultDir, dbPath });
@@ -235,7 +281,16 @@ export async function recall(query, opts = {}) {
     const terms = expandAliases ? expandQuery(base, loadEntities(db)) : base;
     const statuses = includeHistory ? ['active', 'superseded', 'revoked'] : ['active'];
     const { rows, channels } = searchIndex(db, terms, { statuses, limit: 120 });
-    const ranked = rankRows(rows, terms, { includeHistory });
+    const maxDistance = Number.isFinite(Number(vectorMaxDistance))
+      ? Number(vectorMaxDistance)
+      : DEFAULT_MAX_DISTANCE;
+    const channel = await vectorChannel({
+      query, dbPath, vectorDir, mode: vector, statuses, db, rows, maxDistance,
+    });
+    channels.vector = channel.stat;
+    const ranked = rankCandidates(channel.rows, {
+      terms, scoreTopic, vectorHits: channel.hits, maxDistance, includeHistory,
+    });
     const { items, text, chars } = assemble(ranked, { terms, budget, quotas });
     return {
       query,
@@ -243,7 +298,7 @@ export async function recall(query, opts = {}) {
       expanded: terms,
       rebuilt,
       channels,
-      candidates: rows.length,
+      candidates: channel.rows.length,
       items: items.map(({ line, ...rest }) => rest),
       text,
       chars,

@@ -1,15 +1,17 @@
 {
   "name": "mem-bridge",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
-  "description": "Vault(Markdown) + SQLite FTS5 记忆桥：桥核心 + MCP 壳 + 简报/备份",
+  "description": "Vault(Markdown) + SQLite FTS5 + 向量/RRF 记忆桥：桥核心 + MCP 壳 + 简报/备份",
   "engines": {
     "node": ">=22.19"
   },
   "scripts": {
     "recall": "node --disable-warning=ExperimentalWarning bridge/recall.mjs",
     "rebuild": "node --disable-warning=ExperimentalWarning bridge/recall.mjs --rebuild --json",
+    "vector:rebuild": "node --disable-warning=ExperimentalWarning bridge/recall.mjs --rebuild",
+    "eval": "node --disable-warning=ExperimentalWarning bridge/eval.mjs",
     "mcp": "node --disable-warning=ExperimentalWarning server.mjs",
     "smoke": "node --disable-warning=ExperimentalWarning deploy/smoke.mjs",
     "backup": "node --disable-warning=ExperimentalWarning deploy/backup.mjs",
@@ -18,6 +20,7 @@
     "test:capture": "node --disable-warning=ExperimentalWarning test/capture.test.mjs",
     "test:mcp": "node --disable-warning=ExperimentalWarning test/mcp.test.mjs",
     "test:step3": "node --disable-warning=ExperimentalWarning test/step3.test.mjs",
-    "test": "node --disable-warning=ExperimentalWarning test/acceptance.mjs && node --disable-warning=ExperimentalWarning test/capture.test.mjs && node --disable-warning=ExperimentalWarning test/mcp.test.mjs && node --disable-warning=ExperimentalWarning test/step3.test.mjs"
+    "test:vector": "node --disable-warning=ExperimentalWarning test/vector.test.mjs",
+    "test": "node --disable-warning=ExperimentalWarning test/acceptance.mjs && node --disable-warning=ExperimentalWarning test/capture.test.mjs && node --disable-warning=ExperimentalWarning test/mcp.test.mjs && node --disable-warning=ExperimentalWarning test/step3.test.mjs && node --disable-warning=ExperimentalWarning test/vector.test.mjs"
   }
 }

@@ -207,6 +207,16 @@ export function searchIndex(db, terms, { statuses = ['active'], limit = 120 } = 
   return { rows: merged, channels };
 }
 
+/** 按 id 批量取整行（向量命中回填用）；顺序跟随传入的 ids，库里没有的直接跳过 */
+export function getNotesByIds(db, ids) {
+  const wanted = [...new Set((ids || []).map((id) => String(id)).filter(Boolean))];
+  if (!wanted.length) return [];
+  const placeholders = wanted.map(() => '?').join(', ');
+  const rows = db.prepare(`select * from notes where id in (${placeholders})`).all(...wanted);
+  const byId = new Map(rows.map((row) => [String(row.id), row]));
+  return wanted.map((id) => byId.get(id)).filter(Boolean);
+}
+
 /** 单条笔记写索引：重建失败/缺失时先建库 */
 export async function indexNote({ vaultDir, dbPath, rel }) {
   const { db } = await ensureIndex({ vaultDir, dbPath });
